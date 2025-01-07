@@ -4,7 +4,7 @@
 This repository contains the implementation for the paper:
 **Optimal Interpolation-based Coordinate Descent Method for Variational Quantum Algorithms**
 
-The experiments focus on the **TFIM** and **XXZ** models as described in the paper.
+The experiments focus on the **MaxCut**, **TFIM** and **XXZ** models as described in the paper.
 
 ## Running the Code
 
