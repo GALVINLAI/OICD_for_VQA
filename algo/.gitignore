@@ -1,5 +1,5 @@
-*.pkl
-*.png
+# *.pkl
+# *.png
 
 # Exclude all PNG images except those in the "combined_images" directory
 !**/combined_images/*.png

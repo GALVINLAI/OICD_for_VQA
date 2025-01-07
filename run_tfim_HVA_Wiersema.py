@@ -11,12 +11,12 @@ from qiskit.quantum_info.operators import Operator
 from qiskit_aer import AerSimulator
 from qiskit.circuit import QuantumCircuit
 
-from algo.utils_qiskit import dump, make_dir
-from algo.utils_qiskit import mse, optimal_interp_points, interp_matrix
+from algo.utils import dump, make_dir
+from algo.utils import mse, optimal_interp_points, interp_matrix
 
-from algo.oicd_qiskit import oicd
-from algo.gd_qiskit import gd
-from algo.rcd_qiskit import rcd
+from algo.oicd import oicd
+from algo.gd import gd
+from algo.rcd import rcd
 
 def create_parser():
     # Instantiate the argument parser

@@ -6,7 +6,7 @@ from scipy.optimize import minimize
 from IPython.display import clear_output
 from tqdm import trange
 from tqdm.auto import tqdm
-from algo.utils_qiskit import plot_every_iteration
+from algo.utils import plot_every_iteration
 
 
 def oicd(estimate_loss_fun,
@@ -254,7 +254,7 @@ def oicd(estimate_loss_fun,
         # t.set_postfix(message)
         t.refresh()
 
-        if plot_flag and i % 10 == 0:
+        if plot_flag:
 
             plot_every_iteration(expected_record_value, fidelity_record_value, name)
             # plot_every_iteration(best_expected_record_value, fidelity_record_value, name)

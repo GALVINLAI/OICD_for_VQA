@@ -6,7 +6,7 @@ import os
 import numpy as np
 import argparse
 from glob import glob
-from algo.utils_qiskit import load
+from algo.utils import load
 import pickle
 
 fontsize = 20
