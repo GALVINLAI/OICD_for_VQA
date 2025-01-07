@@ -64,7 +64,10 @@ def plot_loss(function_calls_mean, MEANS, STDS, plot_path, fig_prefix, plot_xlim
     """Plot the loss data with mean and std."""
     plt.figure()
     for key, color in zip(MEANS.keys(), colors[:len(MEANS)]):
-        plt.plot(function_calls_mean[key], MEANS[key], linewidth=3, color=color, label=key.upper())
+        if key == 'gd':
+            plt.plot(function_calls_mean[key], MEANS[key], linewidth=3, color=color, label='SGD')
+        else:
+            plt.plot(function_calls_mean[key], MEANS[key], linewidth=3, color=color, label=key.upper())
         lower = MEANS[key] - STDS[key]
         upper = MEANS[key] + STDS[key]
         upper[upper > 1] = 1
