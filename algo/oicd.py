@@ -7,7 +7,7 @@ from IPython.display import clear_output
 from tqdm import trange
 from tqdm.auto import tqdm
 from algo.utils import plot_every_iteration
-
+import scipy
 
 def oicd(estimate_loss_fun,
          expectation_loss,
@@ -15,11 +15,12 @@ def oicd(estimate_loss_fun,
          n_shot, weights_dict, init_weights, num_iter,
          cyclic_mode=False,
          use_pratical_interp_flag=True,
-         use_local_solvers_flag=True, 
+         use_local_solvers_flag=False, 
          use_global_solvers_flag = False,
+         use_eigen_method_flag = True,
          subproblem_method='BFGS',
          subproblem_iter=None,
-         use_exact_update_frequencey_1_flag = False, # True only for all omegas = [1]
+         use_exact_update_frequencey_1_flag = False, # True only for all omegas = [1], [2]
          exact_mode=False, # for testing purpose, no noisy loss
          plot_flag=False,
          plot_argmin_flag = False,
@@ -177,6 +178,16 @@ def oicd(estimate_loss_fun,
 
             updated_weight = result.x.item()
             approx_loss_value = result.fun
+
+        elif use_eigen_method_flag:
+            
+            x0 = weights.copy()[j]
+
+            t_min, f_min = eigen_method_find_minimum(r, reco_coef)
+
+            factor = weights_dict[f'weights_{j}']['scale_factor']
+            updated_weight = t_min / factor
+            approx_loss_value = f_min
 
         elif use_exact_update_frequencey_1_flag:
             
@@ -339,3 +350,238 @@ def construct_Es_inv(s, omegas):
         E_s_inv[2*i+1:2*i+3, 2*i+1:2*i+3] = B_i_T
     
     return E_s_inv
+
+
+
+# def compute_real_roots_fourier_series(a0, a_coeffs, b_coeffs, tolerance=1e-8):
+#     """
+#     Computes the real roots of a finite Fourier series using the eigenvalue method.
+
+#     Parameters:
+#     - a0: Constant term coefficient.
+#     - a_coeffs: List or array of cosine coefficients [a1, a2, ..., aN].
+#     - b_coeffs: List or array of sine coefficients [b1, b2, ..., bN].
+#     - tolerance: Threshold to consider the imaginary part negligible when computing roots (default is 1e-8).
+
+#     Returns:
+#     - roots: Array of real roots within the interval [0, 2π).
+#     """
+#     N = len(a_coeffs)
+#     if len(b_coeffs) != N:
+#         raise ValueError("The lengths of a_coeffs and b_coeffs must be equal.")
+
+#     # Total number of terms in the Fourier series: 2N + 1
+#     total_terms = 2 * N + 1
+
+#     # Define the array h_k according to the given definition
+#     h = np.zeros(total_terms, dtype=complex)
+
+#     # For k = 0 to N-1
+#     for k in range(N):
+#         h[k] = a_coeffs[N - k - 1] + 1j * b_coeffs[N - k - 1]
+
+#     # For k = N
+#     h[N] = 2 * a0
+
+#     # For k = N+1 to 2N
+#     for k in range(N + 1, total_terms):
+#         h[k] = a_coeffs[k - N - 1] - 1j * b_coeffs[k - N - 1]
+
+#     # Construct the 2N x 2N matrix B
+#     size = 2 * N
+#     B = np.zeros((size, size), dtype=complex)
+
+#     # Fill the upper diagonal with 1s (Kronecker delta δ_{j, k-1})
+#     for j in range(size - 1):
+#         B[j, j + 1] = 1.0  # B[j, k] where j = 0..2N-2, k = j+1
+
+#     # Set the last row according to the given definition
+#     denominator = a_coeffs[-1] - 1j * b_coeffs[-1]  # a_N - i * b_N
+#     if np.islose(denominator, 1e-10):
+#         raise ValueError("Denominator in the last row of matrix B is zero.")
+#     # This case implies both a_N and b_N are zero, which is not allowed.
+
+#     B[size - 1, :] = -h[:size] / denominator
+
+#     # Compute the eigenvalues of matrix B
+#     eigenvalues, _ = scipy.linalg.eig(B)
+
+#     # (Optional) Visualize the eigenvalue distribution on the complex plane
+#     # plot_eigenvalues_on_complex_plane(B)
+
+#     # Compute the roots t_k = -i * log(z_k)
+#     # Only retain roots with negligible imaginary parts
+#     real_roots = []
+#     for z in eigenvalues:
+#         if np.isclose(z, 1e-8):
+#             continue  # Avoid log(0)
+#         log_z = np.log(z)
+#         t_k = -1j * log_z
+#         # Check if the imaginary part is negligible
+#         if np.abs(t_k.imag) < tolerance:
+#             # Normalize t_k to be within [0, 2π)
+#             t_k_real = np.mod(t_k.real, 2 * np.pi)
+#             real_roots.append(t_k_real)
+
+#     # Convert to a NumPy array
+#     real_roots = np.array(real_roots)
+
+#     # Remove duplicate roots within the given tolerance
+#     # real_roots = np.unique(np.round(real_roots, decimals=8))  # Adjust decimals as needed
+
+#     # Sort the real roots in ascending order
+#     real_roots = np.sort(real_roots)
+
+#     return real_roots
+
+
+def compute_real_roots_fourier_series(a0, a_coeffs, b_coeffs, tolerance=1e-8):
+    """
+    Computes the real roots of a finite Fourier series using the eigenvalue method.
+
+    Parameters:
+    - a0: Constant term coefficient.
+    - a_coeffs: List or array of cosine coefficients [a1, a2, ..., aN].
+    - b_coeffs: List or array of sine coefficients [b1, b2, ..., bN].
+    - tolerance: Threshold to consider the imaginary part negligible when computing roots (default is 1e-8).
+
+    Returns:
+    - roots: Array of real roots within the interval [0, 2π).
+    """
+    N = len(a_coeffs)
+    if len(b_coeffs) != N:
+        raise ValueError("The lengths of a_coeffs and b_coeffs must be equal.")
+
+    # Check the last elements of a_coeffs and b_coeffs
+    while abs(a_coeffs[-1]) < tolerance and abs(b_coeffs[-1]) < tolerance:
+        # If both the last coefficients are too small (near-zero), remove them
+        a_coeffs = a_coeffs[:-1]
+        b_coeffs = b_coeffs[:-1]
+        N -= 1  # Decrease N, since we've removed one coefficient
+
+        # Check if we have reduced all coefficients
+        if N == 0:
+            raise ValueError("All coefficients are too small, unable to compute roots.")
+
+    # Total number of terms in the Fourier series: 2N + 1
+    total_terms = 2 * N + 1
+
+    # Define the array h_k according to the given definition
+    h = np.zeros(total_terms, dtype=complex)
+
+    # For k = 0 to N-1
+    for k in range(N):
+        h[k] = a_coeffs[N - k - 1] + 1j * b_coeffs[N - k - 1]
+
+    # For k = N
+    h[N] = 2 * a0
+
+    # For k = N+1 to 2N
+    for k in range(N + 1, total_terms):
+        h[k] = a_coeffs[k - N - 1] - 1j * b_coeffs[k - N - 1]
+
+    # Construct the 2N x 2N matrix B
+    size = 2 * N
+    B = np.zeros((size, size), dtype=complex)
+
+    # Fill the upper diagonal with 1s (Kronecker delta δ_{j, k-1})
+    for j in range(size - 1):
+        B[j, j + 1] = 1.0  # B[j, k] where j = 0..2N-2, k = j+1
+
+    # Set the last row according to the given definition
+    denominator = a_coeffs[-1] - 1j * b_coeffs[-1]  # a_N - i * b_N
+    if denominator == 0:
+        raise ValueError("Denominator in the last row of matrix B is zero.")
+    # This case implies both a_N and b_N are zero, which is not allowed.
+
+    B[size - 1, :] = -h[:size] / denominator
+
+    # Compute the eigenvalues of matrix B
+    eigenvalues, _ = scipy.linalg.eig(B)
+
+    # (Optional) Visualize the eigenvalue distribution on the complex plane
+    # plot_eigenvalues_on_complex_plane(B)
+
+    # Compute the roots t_k = -i * log(z_k)
+    # Only retain roots with negligible imaginary parts
+    real_roots = []
+    for z in eigenvalues:
+        if np.isclose(z, 1e-8):
+            continue  # Avoid log(0)
+        log_z = np.log(z)
+        t_k = -1j * log_z
+        # Check if the imaginary part is negligible
+        if np.abs(t_k.imag) < tolerance:
+            # Normalize t_k to be within [0, 2π)
+            t_k_real = np.mod(t_k.real, 2 * np.pi)
+            real_roots.append(t_k_real)
+
+    # Convert to a NumPy array
+    real_roots = np.array(real_roots)
+
+    # Remove duplicate roots within the given tolerance
+    # real_roots = np.unique(np.round(real_roots, decimals=8))  # Adjust decimals as needed
+
+    # Sort the real roots in ascending order
+    real_roots = np.sort(real_roots)
+
+    return real_roots
+
+
+
+def eigen_method_find_minimum(r, reco_coef):
+    """
+    Finds the minimum of a Fourier series using the eigenvalue method.
+
+    Parameters:
+    - r: The number of terms in the Fourier series (also determines the length of reco_coef).
+    - reco_coef: The Fourier coefficients, where the first term is the constant (a0),
+                 followed by alternating cosine (a) and sine (b) coefficients.
+
+    Returns:
+    - t_min: The value of t that minimizes the Fourier series.
+    - f_min: The minimum value of the Fourier series at t_min.
+    """
+    
+    N = r
+
+    # First part: The constant term coefficient (a0)
+    a0 = reco_coef[0] / np.sqrt(2)
+
+    # Second part: Even-indexed coefficients (starting from index 1, step size 2)
+    a_coeffs = reco_coef[1::2]
+
+    # Third part: Odd-indexed coefficients (starting from index 2, step size 2)
+    b_coeffs = reco_coef[2::2]
+    
+    # Compute the Fourier coefficients of the derivative of the series
+    a0_deriv = 0.0  # The constant term derivative is zero
+    a_coeffs_deriv = [b * n for n, b in enumerate(b_coeffs, start=1)]  # Derivatives of cosine terms
+    b_coeffs_deriv = [-a * n for n, a in enumerate(a_coeffs, start=1)]  # Derivatives of sine terms
+    
+    # Find the real roots of f'(t) = 0 using the eigenvalue method
+    try:
+        roots_eigen_fprime = compute_real_roots_fourier_series(a0_deriv, a_coeffs_deriv, b_coeffs_deriv)
+    except Exception as e:
+        print(f"Error in eigenvalue method for f'(t): {e}")
+        roots_eigen_fprime = []
+    
+    # Define the Fourier series function f(t)
+    def f(t):
+        result = a0
+        for n in range(1, N+1):
+            result += a_coeffs[n-1] * np.cos(n * t) + b_coeffs[n-1] * np.sin(n * t)
+        return result
+    
+    # Calculate f(t) at each root of f'(t) = 0
+    f_values = [f(root) for root in roots_eigen_fprime]
+    
+    # Find the minimum value of f(t) and the corresponding t
+    if f_values:
+        min_index = np.argmin(f_values)
+        t_min = roots_eigen_fprime[min_index]
+        f_min = f_values[min_index]
+    else:
+        t_min, f_min = None, None
+    
+    return t_min, f_min
