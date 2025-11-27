@@ -4,17 +4,25 @@ import matplotlib.pyplot as plt
 from IPython.display import clear_output
 from algo.utils import parameter_shift_for_equidistant_frequencies
 from algo.utils import plot_every_iteration
+import time
 
 def gd(estimate_loss_fun, 
         expectation_loss,
-        fidelity,
+        # fidelity,
+        ground_energy,
         n_shot, weights_dict, init_weights, num_iter,
         learning_rate=0.01,
         exact_mode=False,
-        plot_flag=False
+        plot_flag=False,
+        tol = 1e-2,
+        refresh_print_bar = False 
         ):
 
     name = 'GD'
+    success = False
+
+    def metric(weights):
+        return np.abs(expectation_loss(weights)-ground_energy)
 
     if exact_mode:
         estimate_loss = expectation_loss
@@ -27,29 +35,36 @@ def gd(estimate_loss_fun,
     true_loss = expectation_loss(weights)
     best_loss = true_loss
     fun_calling_count = 1
-    fid = fidelity(weights)
-    best_fid = fid
+    # fid = fidelity(weights)
+    # best_fid = fid
     
     expected_record_value = [true_loss]
     best_expected_record_value = [best_loss]   
-    func_count_record_value= [fun_calling_count]
-    fidelity_record_value = [fid]
-    best_fid_record_value = [best_fid]  
+    func_count_record_value = [fun_calling_count]
+    # fidelity_record_value = [fid]
+    # best_fid_record_value = [best_fid]  
+    metric_record = [metric(weights)]
 
     print("-"*100)
 
-    t = trange(num_iter, desc="Bar desc", leave=True)
     m = len(weights)
 
+    t = range(num_iter) if (refresh_print_bar is False) else trange(num_iter, desc="Bar desc", leave=True)
     for i in t:
-        
+
+        start = time.perf_counter()
+
         gradient = np.zeros(m)
         
         for j in range(m):
             # read the info for parameter shift rule
             omegas = weights_dict[f'weights_{j}']['omegas']
             factor = weights_dict[f'weights_{j}']['scale_factor']
-            gradient[j] = parameter_shift_for_equidistant_frequencies(estimate_loss, weights, j, omegas, factor)
+            gradient[j] = parameter_shift_for_equidistant_frequencies(estimate_loss, 
+                                                                      weights, 
+                                                                      j, 
+                                                                      omegas, 
+                                                                      factor)
             fun_calling_count += 2*len(omegas)
         
         weights = weights - learning_rate * gradient
@@ -60,27 +75,37 @@ def gd(estimate_loss_fun,
             best_loss = true_loss
             best_weights = weights.copy()
 
-        fid = fidelity(weights)
-        if fid > best_fid:
-            best_fid = fid
+        # fid = fidelity(weights)
+        # if fid > best_fid:
+            # best_fid = fid
 
         expected_record_value.append(true_loss)
         best_expected_record_value.append(best_loss)
         func_count_record_value.append(fun_calling_count)
-        fidelity_record_value.append(fid)
-        best_fid_record_value.append(best_fid)
+        # fidelity_record_value.append(fid)
+        # best_fid_record_value.append(best_fid)
+
+        dist = metric(weights)
+        metric_record.append(dist)
         
-        message = f"Iter: {i}, Best loss: {best_loss:.4f}, Cur. loss: {true_loss:.4f}, Best Fid.: {best_fid:.4f}, Cur. Fid.: {fid:.4f}"
-        # message = f"Iter: {i}, Best loss: {best_loss}, True loss: {true_loss}, Fidelity: {fid}"
-        t.set_description(f"[{name}] %s" % message)
-        t.refresh()
+        end = time.perf_counter()
+        elapsed = end - start
+        message = f"Iter: {i}, {j}({m}), Metric: {dist:.4f}, Elapsed: {elapsed:.2f}s"
+
+        if refresh_print_bar is True:
+            t.set_description(f"[{name}] %s" % message)
+            t.refresh()
+        else:
+            print(f"[{name}]", message)
 
         if plot_flag:
-            plot_every_iteration(expected_record_value, fidelity_record_value, name)
+            plot_every_iteration(metric_record, name)
+            # plot_every_iteration(expected_record_value, name)
             # plot_every_iteration(best_expected_record_value, fidelity_record_value, name)
             # plot_every_iteration(best_expected_record_value, best_fid_record_value, name)
 
-        if np.abs(fid - 1) < 1e-3:
+        if np.abs(dist) < tol:
+            success = True
             break
 
-    return best_weights, best_expected_record_value, best_fid_record_value, func_count_record_value, expected_record_value, fidelity_record_value
+    return success, best_expected_record_value, func_count_record_value, expected_record_value, metric_record

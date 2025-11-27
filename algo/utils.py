@@ -1,4 +1,5 @@
 import numpy as np
+import matplotlib
 import matplotlib.pyplot as plt
 from IPython.display import clear_output
 from scipy.optimize import differential_evolution
@@ -7,12 +8,260 @@ import pickle
 import random
 import re
 from functools import reduce
+from qiskit.quantum_info import SparsePauliOp
+from qiskit.circuit import QuantumCircuit, ParameterVector
+from qiskit.primitives import Estimator
+from qiskit_algorithms.gradients import ParamShiftEstimatorGradient
+
+
+# ================================================================
+#          model utils
+# ================================================================
+
+def tfim_hamiltonian(num_q, J=-1.0, g=-0.5, bc='periodic'):
+    """
+    Construct the Hamiltonian for the 1D transverse field Ising model (TFIM) with optional boundary conditions:
+        H = J * sum_{i} Z_i Z_{i+1} + g * sum_i X_i
+
+    Parameters:
+        num_q (int): Number of qubits (>=1)
+        J (float): Coupling strength for nearest-neighbor ZZ interactions
+        g (float): Transverse field strength for X terms
+        bc (str): Boundary condition, either 'open' or 'periodic'
+
+    Returns:
+        SparsePauliOp: The corresponding Hamiltonian as a sum of Pauli operators
+    """
+    pauli_list = []
+    if num_q == 1:
+        raise ValueError("num_q must be greater than 1 for single qubit TFIM model")
+    elif num_q == 2:
+        pauli_list.append(('ZZ', J))
+        pauli_list.append(('XI', g))
+        pauli_list.append(('IX', g))
+    else:
+        # Nearest-neighbor ZZ interaction
+        for i in range(num_q):
+            j = (i + 1) % num_q
+            if bc == 'open' and i == num_q - 1:
+                continue
+            label = ['I'] * num_q
+            label[i] = 'Z'
+            label[j] = 'Z'
+            pauli_list.append((''.join(label), J))
+
+        # Transverse field X terms
+        for i in range(num_q):
+            label = ['I'] * num_q
+            label[i] = 'X'
+            pauli_list.append((''.join(label), g))
+
+    return SparsePauliOp.from_list(pauli_list)
+
+
+def circuit_HVA_TIFM(num_q: int, layer: int):
+    """
+    Construct a parameterized HVA (Hamiltonian Variational Ansatz) quantum circuit
+    for the Transverse Field Ising Model (TFIM), along with its parameter vector.
+    
+    Parameters:
+        num_q (int): Number of qubits
+        layer (int): Number of HVA layers (depth of the variational circuit)
+    
+    Returns:
+        param_qc (QuantumCircuit): The parameterized quantum circuit
+        theta (ParameterVector): The parameter vector
+    """
+    num_p = 2 * layer
+    theta = ParameterVector("θ", num_p)
+    
+    circ = QuantumCircuit(num_q)
+    
+    # # Initial layer: apply Hadamard gates to all qubits
+    # for j in range(num_q):
+    #     circ.h(j)
+    
+    # Variational layers
+    for i in range(layer):
+        # ZZ interaction terms (ring topology assumed)
+        for j in range(num_q):
+            circ.rzz(theta[2 * i], j, (j + 1) % num_q)
+        # Transverse field X terms
+        for j in range(num_q):
+            circ.rx(theta[2 * i + 1], j)
+    
+    return circ, theta
+
+
+def xxz_hamiltonian(num_q, Jx=1.0, Jy=1.0, Jz=0.5, bc='periodic'):
+    """
+    先按 XX, YY, ZZ 分组循环添加 XXZ 模型的 Pauli 项。
+    
+    参数:
+        num_q (int): 量子比特数
+        Jx, Jy, Jz (float): XX, YY, ZZ 耦合强度
+        bc (str): 边界条件, 'open' 或 'periodic'
+    返回:
+        SparsePauliOp: 构造好的 Hamiltonian
+    """
+    pauli_list = []
+    # 三种分组和对应耦合
+    if num_q == 1:
+        raise ValueError("num_q must be greater than 1 for single qubit XXZ model")
+    elif num_q == 2:
+        pauli_list.append(('XX', Jx))
+        pauli_list.append(('YY', Jy))
+        pauli_list.append(('ZZ', Jz))
+    else:
+        for pauli_label, J in [('XX', Jx), ('YY', Jy), ('ZZ', Jz)]:
+            for i in range(num_q):
+                if bc == 'open' and i == num_q - 1:
+                    break
+                j = (i + 1) % num_q
+                # 先全部设为 'I'
+                label = ['I'] * num_q
+                # 在第 i, j 两位上放 pauli_label 中的字符
+                label[i] = pauli_label[0]
+                label[j] = pauli_label[1]
+                pauli_list.append((''.join(label), J))
+    return SparsePauliOp.from_list(pauli_list)
+
+
+def circuit_QAOA_XXZ(num_q: int, layer: int):
+    """
+    构造带参数的 HVA TFIM 量子电路与对应的参数向量。
+    
+    参数:
+        num_q (int): 量子比特数
+        layer (int): HVA 变分层数
+    
+    返回:
+        param_qc (QuantumCircuit): 带参数的量子电路
+        theta (ParameterVector): 参数向量
+    """
+    num_p = 4 * layer
+    theta = ParameterVector("θ", num_p)
+
+    circ = QuantumCircuit(num_q)
+    
+    # 是否出现 BP 这里的 初始态也很重要！
+
+    # # Input layer 
+    # for j in range(num_q):
+    #     circ.h(j)  # Apply X gate to all qubits, initializing them from |0> to |1>.
+    
+    # Input layer to prepare Bell state -\psi
+    for j in range(num_q):
+        circ.x(j)  # Apply X gate to all qubits, initializing them from |0> to |1>.
+    
+    for j in range(int(num_q / 2)):
+        # Then, for each pair of adjacent qubits (2j and 2j+1), apply H gate and CX (CNOT) gate to create Bell states.
+        circ.h(2 * j)  # Apply Hadamard gate to each pair of qubits to create superposition states
+        circ.cx(2 * j, 2 * j + 1)  # Create Bell state: Apply CNOT gate to each pair of qubits
+
+    # QAOA 变分层
+    for i in range(layer):
+        # 奇子层
+        for j in range(int(num_q / 2)):
+            circ.rzz(theta[4*i], 2*j+1, (2*j+2)%num_q)
+        for j in range(int(num_q / 2)):
+            circ.ryy(theta[4*i+1], 2*j+1, (2*j+2)%num_q)
+        for j in range(int(num_q / 2)):
+            circ.rxx(theta[4*i+1], 2*j+1, (2*j+2)%num_q)
+        # 偶子层
+        for j in range(int(num_q / 2)):
+            circ.rzz(theta[4*i+2], 2*j, 2*j+1)
+        for j in range(int(num_q / 2)):
+            circ.ryy(theta[4*i+3], 2*j, 2*j+1)
+        for j in range(int(num_q / 2)):
+            circ.rxx(theta[4*i+3], 2*j, 2*j+1)
+
+    return circ, theta 
+
+
+def expectation_loss_grad(
+    num_q: int,
+    layer: int,
+    weights: np.ndarray,
+    circuit: QuantumCircuit,
+    obs: SparsePauliOp,
+    output: str = "expval",  # or "both"
+    spec_param: list[int] | int | None = None,
+    shots: int = None,
+):
+    """
+    Compute the expectation value of an HVA-TFIM quantum circuit under the TFIM Hamiltonian,
+    and optionally compute the gradients with respect to specific parameters.
+
+    Parameters:
+        num_q (int): Number of qubits
+        layer (int): Number of HVA variational layers
+        weights (np.ndarray): Array of circuit parameters, length = 2 * layer
+        output (str): "expval" (return only expectation value) or "both" (return both expectation and gradient)
+        spec_param (list[int] | int | None): 
+            - None: compute gradients w.r.t. all parameters  
+            - int: compute gradient w.r.t. a specific parameter  
+            - list[int]: compute gradients w.r.t. specified parameters
+    
+    Returns:
+        If output == "expval":
+            float: Expectation value of the circuit
+        If output == "both":
+            tuple:
+                float: Expectation value  
+                np.ndarray: Array of gradients w.r.t. spec_param
+    """
+    # 1. Construct the parameterized HVA-TFIM circuit
+    qc, param = circuit(num_q, layer)
+    
+    # 2. Construct the TFIM Hamiltonian
+    # tfim_op = hamiltionian(num_q, J=-1.0, g=-0.5, bc='periodic')
+    
+    # 3. Initialize the Estimator and the parameter-shift gradient calculator
+    if shots is None:
+        est = Estimator()
+    else:
+        est = Estimator(options={"shots": shots})
+    grad_est = ParamShiftEstimatorGradient(est)
+    
+    # 4. Compute the expectation value
+    expval = est.run([qc], [obs], [weights]).result().values[0]
+    
+    # If only expectation value is required, return it
+    if output == "expval":
+        return expval
+
+    # 5. Prepare parameter indices for differentiation
+    if spec_param is None:
+        # Compute gradient w.r.t. all parameters
+        parameters = None
+    else:
+        # Convert single integer to list
+        if isinstance(spec_param, int):
+            spec_param = [spec_param]
+        # Select corresponding Parameter objects from the parameter vector
+        parameters = [param[i] for i in spec_param]
+    
+    # 6. Compute the gradients
+    grad_res = grad_est.run(
+        [qc],
+        [obs],
+        [weights],
+        [parameters]
+    ).result()
+    # grad_res.gradients is a list like [array([...])]
+    grad = grad_res.gradients[0]
+    
+    # 7. Return expectation value and gradient
+    return expval, grad
+
 
 # ================================================================
 #          check utils
 # ================================================================
 
-def compare_functions(func1, func2, num_tests=50, input_range=(-10 * np.pi, 10 * np.pi), atol=1e-8, rtol=1e-5):
+def compare_functions(func1, func2, num_tests=50, input_range=(-10 * np.pi, 10 * np.pi), atol=1e-8, rtol=1e-5,
+                      verbose=False):
     """
     Compare the behavior of two functions
     - func1, func2: The two functions to compare
@@ -46,7 +295,8 @@ def compare_functions(func1, func2, num_tests=50, input_range=(-10 * np.pi, 10 *
     # Output comparison details
     # print(f"Testing range: {input_range}")
     # print(f"Total tests: {num_tests}")
-    print(f"Consistent results: {num_consistent}/{num_tests}")
+    if verbose:
+        print(f"Consistent results: {num_consistent}/{num_tests}")
     
     if num_failed > 0:
         print(f"Failed tests: {num_failed}/{num_tests}")
@@ -54,7 +304,8 @@ def compare_functions(func1, func2, num_tests=50, input_range=(-10 * np.pi, 10 *
             print(f"  At input {x}, func1 returned {output1}, func2 returned {output2}")
     else:
         # print("【All tests passed within the given tolerance！Two function are the same!】")
-        print("【All Passed】")
+        if verbose:
+            print("【All Passed】")
     
     return num_failed == 0  # Return True if there are no failed tests
 
@@ -65,7 +316,8 @@ def interp_matrix(interp_points, Omegas):
     return np.array([[1/np.sqrt(2)] + [func(Omegas[k] * x) for k in range(r) for func in (np.cos, np.sin)] for x in interp_points])
 
 
-def check_is_trigometric(true_cost_fun, index_to_check, omegas, weights, opt_interp_flag=True):
+def check_is_trigometric(true_cost_fun, index_to_check, omegas, weights, opt_interp_flag=True,
+                         verbose=False):
     """
     Check if a cost function behaves like a trigonometric function.
     This only for the equdistant frequency case.
@@ -113,8 +365,8 @@ def check_is_trigometric(true_cost_fun, index_to_check, omegas, weights, opt_int
     fun_vals = np.array(fun_vals)
     
     # Create an interpolation matrix based on the interpolation points and frequencies (omegas)
-    # reg_param=1e-8
-    opt_interp_matrix = interp_matrix(interp_points, omegas) # + reg_param * np.eye(2*r + 1)
+    reg_param=1e-8
+    opt_interp_matrix = interp_matrix(interp_points, omegas)  + reg_param * np.eye(2*r + 1)
 
     # Solve the system of linear equations to estimate the coefficients (hat_z)
     # This solves the equation: opt_interp_matrix * hat_z = fun_vals
@@ -130,12 +382,13 @@ def check_is_trigometric(true_cost_fun, index_to_check, omegas, weights, opt_int
 
     
     # Compare the univariate function (where only one weight is varied) with the estimated function
-    compare_functions(univariate_fun, hat_f)
+    num_failed = compare_functions(univariate_fun, hat_f, verbose)
 
     # Print the estimated coefficients (hat_z)
-    print("Estimated coefficients: ", hat_z)
+    if verbose:
+        print("Estimated coefficients: ", hat_z)
 
-    return hat_z
+    return hat_z, num_failed
 
 
 # ================================================================
@@ -202,31 +455,33 @@ def parameter_shift_for_equidistant_frequencies(estimate_loss, weights, index, o
     return np.sum(coefs * np.array(evals)) * factor
 
 
-def plot_every_iteration(expected_record_value, fidelity_record_value, name, approx_record_value=[]):
+def plot_every_iteration(expected_record_value, name, approx_record_value=[]):
     
     clear_output(wait=True)
 
     # Create a 1x2 subplot
-    _, axs = plt.subplots(1, 2, figsize=(12, 6))
+    # _, axs = plt.subplots(1, 2, figsize=(12, 6))
+
+    _, ax = plt.subplots(figsize=(6, 6))
 
     # Plot Approx Loss and True Loss on the first subplot
     # if approx_record_value is not None:
-    if len(approx_record_value) > 0:
-        axs[0].plot(approx_record_value, label='Approx Loss')
-    axs[0].plot(expected_record_value, label='True Loss')
-    axs[0].set_xlabel('Iteration')
-    axs[0].set_title(f'{name} Loss')
-    axs[0].legend(fontsize=12)
+    if approx_record_value:
+        ax.plot(approx_record_value, label='Approx Loss')
+    ax.plot(expected_record_value, label='True Loss')
 
-    # Plot Fidelity on the second subplot
-    axs[1].plot(fidelity_record_value, label='Fidelity', color='g')
-    axs[1].axhline(y=1, color='r', linestyle='--', label='1')
-    axs[1].set_xlabel('Iteration')
-    axs[1].set_title('Fidelity')
-    axs[1].legend(fontsize=12)
+    ax.set_xlabel('Iteration')
+    ax.set_ylabel('Metric')
+    ax.set_title(f'{name} Metric')
+    ax.legend(fontsize=12)
+    # ax.grid(True)
 
-    # Show the plot
-    plt.tight_layout()  # Automatically adjust the spacing between subplots
+    # r'$|\langle O\rangle_{\rm ground} - \langle O\rangle_{\theta}|$'
+
+    # 设置 y 轴对数刻度
+    ax.set_yscale('log')
+
+    plt.tight_layout()
     plt.show()
 
 
@@ -249,6 +504,27 @@ def filter_omegas(estimated_coefficients, omegas, threshold=1e-8):
     omegas_filtered = np.delete(omegas, indices_to_remove)
 
     return omegas_filtered
+
+def is_equidistance_sequence(int_list):
+    """
+    检查一个整数列表是否在排序后构成等差数列。
+
+    参数:
+    - int_list: List[int]，整数列表
+
+    返回:
+    - bool，是否为等差数列
+    """
+    if len(int_list) < 2:
+        return True  # 一个或零个元素视为等差数列
+
+    sorted_list = sorted(int_list)
+    diff = sorted_list[1] - sorted_list[0]
+
+    for i in range(2, len(sorted_list)):
+        if sorted_list[i] - sorted_list[i - 1] != diff:
+            return False
+    return True
 
 
 # ================================================================

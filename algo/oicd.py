@@ -11,7 +11,8 @@ import scipy
 
 def oicd(estimate_loss_fun,
          expectation_loss,
-         fidelity, 
+        #  fidelity, 
+        ground_energy,
          n_shot, weights_dict, init_weights, num_iter,
          cyclic_mode=False,
          use_pratical_interp_flag=True,
@@ -24,6 +25,8 @@ def oicd(estimate_loss_fun,
          exact_mode=False, # for testing purpose, no noisy loss
          plot_flag=False,
          plot_argmin_flag = False,
+         tol = 1e-2,
+         refresh_print_bar = False 
          ):
     """
     Optimize VQA's weights using the Optimal Interpolation Coordinate Descent (OICD) method.
@@ -47,6 +50,10 @@ def oicd(estimate_loss_fun,
     """
 
     name = 'OICD'
+    success = False
+
+    def metric(weights):
+        return np.abs(expectation_loss(weights)-ground_energy)
 
     if exact_mode: # for testing purpose
         estimate_loss = expectation_loss
@@ -59,31 +66,33 @@ def oicd(estimate_loss_fun,
     true_loss = expectation_loss(weights)
     best_loss = true_loss
     fun_calling_count = 1
-    fid = fidelity(weights)
-    best_fid = fid
+    # fid = fidelity(weights)
+    # best_fid = fid
     approx_loss_value = true_loss
 
     expected_record_value = [true_loss]
     best_expected_record_value = [best_loss]   
     func_count_record_value= [fun_calling_count]
-    fidelity_record_value = [fid]
-    best_fid_record_value = [best_fid]   
+    # fidelity_record_value = [fid]
+    # best_fid_record_value = [best_fid]   
     # approx_record_value = [approx_loss_value]
+    metric_record = [metric(weights)]
 
     print("-"*100)
-    
-    t = trange(num_iter, desc="Bar desc", leave=True)
-    # t = tqdm(range(num_iter), desc="Bar desc", leave=True)
 
     m = len(weights)
 
+    t = range(num_iter) if (refresh_print_bar is False) else trange(num_iter, desc="Bar desc", leave=True)
     for i in t:
+
+        start = time.perf_counter()
 
         # choose a random index to update
         if cyclic_mode:
             j = i % m
         else:
-            j = np.random.randint(m)
+            j = np.random.randint(m) if i == 0 else draw_new_j(m, prev_j)
+            prev_j = j
 
         # read the info for interpolation
         omegas = weights_dict[f'weights_{j}']['omegas']
@@ -238,45 +247,49 @@ def oicd(estimate_loss_fun,
             best_loss = true_loss
             best_weights = weights.copy()
 
-        fid = fidelity(weights)
-        if fid > best_fid:
-            best_fid = fid
+        # fid = fidelity(weights)
+        # if fid > best_fid:
+        #     best_fid = fid
+
+        dist = metric(weights)
+        metric_record.append(dist)
 
         expected_record_value.append(true_loss)
         best_expected_record_value.append(best_loss)
         func_count_record_value.append(fun_calling_count)
-        fidelity_record_value.append(fid)
-        best_fid_record_value.append(best_fid)
+        # fidelity_record_value.append(fid)
+        # best_fid_record_value.append(best_fid)
         # approx_record_value.append(approx_loss_value)
     
-        message = f"Iter: {i}, {j}({m}), Best loss: {best_loss:.4f}, Cur. loss: {true_loss:.4f}, Best Fid.: {best_fid:.4f}, Cur. Fid.: {fid:.4f}"
-        # message = {
-        #     "Algo": f"[{name}]",
-        #     "Iter": f"{i}",
-        #     "Cord": f"{j}({m})",
-        #     "Best Loss": f"{best_loss:.4f}",
-        #     "Cur. Loss": f"{true_loss:.4f}",
-        #     "Best Fid.": f"{best_fid:.4f}",
-        #     "Cur. Fid.": f"{fid:.4f}"
-        # }
-        
-        t.set_description(f"[{name}] %s" % message)
-        # t.set_description(message)
-        # t.set_postfix(message)
-        t.refresh()
+
+        end = time.perf_counter()
+        elapsed = end - start
+        message = f"Iter: {i}, {j}({m}), Metric: {dist:.4f}, Elapsed: {elapsed:.2f}s"
+
+        if refresh_print_bar is True:
+            t.set_description(f"[{name}] %s" % message)
+            t.refresh()
+        else:
+            print(f"[{name}]", message)
+
 
         if plot_flag:
-
-            plot_every_iteration(expected_record_value, fidelity_record_value, name)
+            plot_every_iteration(metric_record, name)    
+            # plot_every_iteration(expected_record_value, fidelity_record_value, name)
             # plot_every_iteration(best_expected_record_value, fidelity_record_value, name)
             # plot_every_iteration(best_expected_record_value, best_fid_record_value, name)
 
-        if np.abs(fid - 1) < 1e-3:
+        if np.abs(dist) < tol:
+            success = True
             break
         
-    return best_weights, best_expected_record_value, best_fid_record_value, func_count_record_value, expected_record_value, fidelity_record_value
+    return weights, success, best_expected_record_value, func_count_record_value, expected_record_value, metric_record
 
-
+def draw_new_j(m, prev_j):
+    j = np.random.randint(m)
+    while prev_j is not None and j == prev_j:
+        j = np.random.randint(m)
+    return j
 
 def update_for_frequency_1(a, b, c, approx_loss):
     """
